@@ -40,6 +40,10 @@ var that           = {},  // Public API methods
     rfb_password   = '',
     rfb_path       = '',
 
+    //for XVP
+    rfb_xvp_user   = '',
+    rfb_xvp_vm     = '',
+
     rfb_state      = 'disconnected',
     rfb_version    = 0,
     rfb_max_version= 3.8,
@@ -558,10 +562,17 @@ handle_message = function() {
 };
 
 
-function genDES(password, challenge) {
+function genDES(password, challenge,is_hex_string) {
     var i, passwd = [];
-    for (i=0; i < password.length; i += 1) {
-        passwd.push(password.charCodeAt(i));
+    if(is_hex_string){
+        // hex string -> byte array
+        for (i=0; i < password.length/2; i += 1) {
+            passwd[i] = parseInt(password.slice(2*i,2*i+2),16);
+        }
+    }else{
+        for (i=0; i < password.length; i += 1) {
+            passwd.push(password.charCodeAt(i));
+        }
     }
     return (new DES(passwd)).encrypt(challenge);
 }
@@ -665,7 +676,7 @@ mouseMove = function(x, y) {
 init_msg = function() {
     //Util.Debug(">> init_msg [rfb_state '" + rfb_state + "']");
 
-    var strlen, reason, length, sversion, cversion, repeaterID,
+    var strlen, reason, length, sversion, cversion, repeaterID, user_target,
         i, types, num_types, challenge, response, bpp, depth,
         big_endian, red_max, green_max, blue_max, red_shift,
         green_shift, blue_shift, true_color, name_length, is_repeater;
@@ -733,7 +744,7 @@ init_msg = function() {
             types = ws.rQshiftBytes(num_types);
             Util.Debug("Server security types: " + types);
             for (i=0; i < types.length; i+=1) {
-                if ((types[i] > rfb_auth_scheme) && (types[i] < 3)) {
+                if ((types[i] > rfb_auth_scheme) && (types[i] < 3 || types[i]===22)) {//Accept XVP type
                     rfb_auth_scheme = types[i];
                 }
             }
@@ -789,6 +800,19 @@ init_msg = function() {
                 ws.send(response);
                 updateState('SecurityResult');
                 return;
+            case 22: // XVP authentication
+                user_target = [];
+                user_target[0] = rfb_xvp_user.length;
+                user_target[1] = rfb_xvp_vm.length;
+                for (i=0; i < rfb_xvp_user.length; i+=1) {
+                    user_target.push(rfb_xvp_user.charCodeAt(i));
+                }
+                for (i=0; i < rfb_xvp_vm.length; i+=1) {
+                    user_target.push(rfb_xvp_vm.charCodeAt(i));
+                }
+                ws.send(user_target);
+                updateState('XVPChallenge');
+                return;
             default:
                 fail("Unsupported auth scheme: " + rfb_auth_scheme);
                 return;
@@ -796,7 +820,13 @@ init_msg = function() {
         updateState('ClientInitialisation', "No auth required");
         init_msg();  // Recursive fallthrough (workaround JSLint complaint)
         break;
-
+    case 'XVPChallenge' : // 2nd stage of XVP authentication
+        if (ws.rQwait("auth challenge", 16)) { return false; }
+        challenge = ws.rQshiftBytes(16);
+        response = genDES(rfb_password, challenge, true);
+        ws.send(response);
+        updateState('SecurityResult');
+        break;
     case 'SecurityResult' :
         if (ws.rQwait("VNC auth response ", 4)) { return false; }
         switch (ws.rQshift32()) {
@@ -1778,13 +1808,16 @@ clientCutText = function(text) {
 // Public API interface functions
 //
 
-that.connect = function(host, port, password, path) {
+that.connect = function(host, port, password, path, user, vm) {
     //Util.Debug(">> connect");
 
     rfb_host       = host;
     rfb_port       = port;
     rfb_password   = (password !== undefined)   ? password : "";
     rfb_path       = (path !== undefined) ? path : "";
+
+    rfb_xvp_user   = (user !== undefined) ? user : "";
+    rfb_xvp_vm     = (vm !== undefined) ? vm : "";
 
     if ((!rfb_host) || (!rfb_port)) {
         return fail("Must set host and port");
